@@ -54,3 +54,4 @@ print(client.quotes("AMD").json())  # make api calls
 * `websockets` – used for streaming
 * `cryptography` – used for encryption of the token database (optional)
 * `aiohttp` – used for asynchronous HTTP requests (async client), **not** included by default
+* `redis` – used for optional Redis token storage (`tokens_db="redis://..."`), **not** included by default; install with `pip install 'schwabdev[redis]'`

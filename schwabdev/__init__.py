@@ -1,5 +1,6 @@
 from .client import Client, ClientAsync
 from .stream import Stream, StreamAsync
+from .token_store import TokenStore, SqliteTokenStore, JSONTokenStore, RedisTokenStore
 from .translate import stream_fields
 from .utils import save_env_global
 try:
@@ -16,5 +17,9 @@ __all__ = [
     "Context",
     "Costs",
     "save_env_global",
+    "TokenStore",
+    "SqliteTokenStore",
+    "JSONTokenStore",
+    "RedisTokenStore",
 ]
-__version__ = "4.0.0"
+__version__ = "4.1.0"

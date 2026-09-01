@@ -1,3 +1,9 @@
+## Version 4.1.0
+* Added pluggable `TokenStore` backend; sqlite remains the default
+* Added optional JSON file token storage via `tokens_db="...tokens.json"` (atomic writes, best-effort file locking)
+* Added optional Redis token storage via `tokens_db="redis://..."` (install with `pip install 'schwabdev[redis]'`)
+* Cross-instance refresh coordination now uses a redis distributed lock for the redis backend and a file lock for the JSON backend (sqlite `BEGIN EXCLUSIVE` unchanged)
+
 ## Version 4.0.0
 * Added Schwabdev Trader Context as an optional submodule
 * Added the ability to save App keys globally by using `save_env_global`

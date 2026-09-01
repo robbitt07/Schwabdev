@@ -5,7 +5,6 @@ These tests never touch the network or the real OAuth flow. Clients, the stream
 base, and the token manager are constructed directly (bypassing __init__).
 """
 import logging
-import sqlite3
 import threading
 
 import pytest
@@ -128,17 +127,10 @@ def build_stream_base():
     return b
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS schwabdev (
-    access_token_issued TEXT NOT NULL, refresh_token_issued TEXT NOT NULL,
-    access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, id_token TEXT NOT NULL,
-    expires_in INTEGER, token_type TEXT, scope TEXT);
-"""
-
-
 def build_tokens(db_path=":memory:", encryption=None):
-    """A Tokens instance backed by a real sqlite connection but no OAuth/network."""
+    """A Tokens instance backed by a real sqlite store but no OAuth/network."""
     from cryptography.fernet import Fernet
+    from schwabdev.token_store import SqliteTokenStore
     t = tokens_mod.Tokens.__new__(tokens_mod.Tokens)
     t.access_token, t.refresh_token, t.id_token = "AT", "RT", "ID"
     t._app_key, t._app_secret = "appkey", "appsecret"
@@ -152,10 +144,7 @@ def build_tokens(db_path=":memory:", encryption=None):
     t._access_token_timeout = 1800
     t._refresh_token_timeout = 7 * 24 * 60 * 60
     t._cipher_suite = Fernet(encryption) if encryption else None
-    t._conn = sqlite3.connect(db_path, check_same_thread=False)
-    t._cur = t._conn.cursor()
-    t._cur.executescript(_SCHEMA)
-    t._conn.commit()
+    t._store = SqliteTokenStore(db_path, LOG)
     return t
 
 
@@ -181,4 +170,4 @@ def stream_base():
 def tokens():
     t = build_tokens()
     yield t
-    t._conn.close()
+    t._store.close()

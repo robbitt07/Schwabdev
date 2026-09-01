@@ -35,7 +35,11 @@ class ClientBase:
             app_key (str): App key credential.
             app_secret (str): App secret credential.
             callback_url (str): URL for callback.
-            tokens_db (str): Path to tokens file.
+            tokens_db (str): Path to tokens store (database/redis/file).
+                - Default to sqlite database store.
+                - Assigned redis store if ``tokens_db`` starts with ``redis://`` or
+                  ``rediss://`` (requires ``pip install 'schwabdev[redis]'``).
+                - Assigned json store if ``tokens_db`` ends with ``.json``.
             timeout (int): Request timeout in seconds - how long to wait for a response.
             call_on_auth (function | None): Function to call for authentication (see docs).
             open_browser_for_auth (bool): Whether to open the browser for authentication.
@@ -130,7 +134,11 @@ class Client(ClientBase):
             app_key (str): App key credential.
             app_secret (str): App secret credential.
             callback_url (str): URL for callback.
-            tokens_db (str): Path to tokens file.
+            tokens_db (str): Path to tokens store (database/redis/file).
+                - Default to sqlite database store.
+                - Assigned redis store if ``tokens_db`` starts with ``redis://`` or
+                  ``rediss://`` (requires ``pip install 'schwabdev[redis]'``).
+                - Assigned json store if ``tokens_db`` ends with ``.json``.
             timeout (int): Request timeout in seconds.
             call_on_auth (function | None): Function to call for custom auth flow.
             open_browser_for_auth (bool): Whether to open the browser for authentication.

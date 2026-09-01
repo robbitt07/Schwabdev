@@ -8,12 +8,13 @@ import datetime
 import json
 import logging
 import os
-import sqlite3
 import threading
 import urllib.parse
 
 import requests
 from cryptography.fernet import Fernet
+
+from .token_store import RedisTokenStore, SqliteTokenStore, JSONTokenStore, TokenStore
 
 _ENC_PREFIX = "enc:"
 _UTC = datetime.timezone.utc
@@ -40,7 +41,11 @@ class Tokens:
             app_secret (str | None): App secret credential (overrides env.json's app_secret).
             callback_url (str | None): Url for callback (overrides env.json's callback_url).
             logger (logging.Logger | None): logger (defaults to the "Schwabdev" logger).
-            tokens_db (str): Path to tokens database file.
+            tokens_db (str): Path to tokens store (database/redis/file).
+                - Default to sqlite database store.
+                - Assigned redis store if ``tokens_db`` starts with ``redis://`` or
+                  ``rediss://`` (requires ``pip install 'schwabdev[redis]'``).
+                - Assigned json store if ``tokens_db`` ends with ``.json``.
             encryption (str | None): Fernet key for encrypting tokens at rest.
             call_for_auth (function | None): Function to call for custom auth flow.
             open_browser_for_auth (bool): Open a browser during the auth flow.
@@ -71,10 +76,11 @@ class Tokens:
             raise ValueError("[Schwabdev] callback_url must be https.")
         if callback_url.endswith("/"):
             raise ValueError("[Schwabdev] callback_url cannot be a path (ends with \"/\").")
-        if tokens_db.endswith("/"):
-            raise ValueError("[Schwabdev] Tokens file cannot be a path.")
         if call_for_auth is not None and not callable(call_for_auth):
             raise ValueError("[Schwabdev] call_for_auth must be a callable function.")
+        # File-path backends cannot be a bare directory; redis URLs are not paths.
+        if not tokens_db.startswith(("redis://", "rediss://")) and tokens_db.endswith("/"):
+            raise ValueError("[Schwabdev] Tokens file cannot be a path.")
 
         # public token state
         self.access_token = None
@@ -95,30 +101,11 @@ class Tokens:
         self._refresh_token_timeout = 7 * 24 * 60 * 60  # seconds (7 days from Schwab)
         self._cipher_suite = Fernet(encryption) if (encryption and len(encryption) > 16) else None
 
-        # init token database
-        tokens_db = os.path.expanduser(tokens_db)
-        db_dir = os.path.dirname(tokens_db)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        self._conn = sqlite3.connect(tokens_db, check_same_thread=False)
-        self._cur = self._conn.cursor()
+        # init token store (auto-detect backend from tokens_db)
+        self._store = self._build_store(tokens_db)
 
         with self._update_lock:
-            self._cur.execute("""
-            CREATE TABLE IF NOT EXISTS schwabdev (
-                access_token_issued TEXT NOT NULL,
-                refresh_token_issued TEXT NOT NULL,
-                access_token TEXT NOT NULL,
-                refresh_token TEXT NOT NULL,
-                id_token TEXT NOT NULL,
-                expires_in INTEGER,
-                token_type TEXT,
-                scope TEXT
-            );
-            """)
-            self._cur.execute("PRAGMA busy_timeout = 30000;")
-            self._conn.commit()
-            loaded = self._load_tokens_from_db()
+            loaded = self._load_tokens_from_store()
 
         if loaded:
             self.update_tokens()
@@ -127,12 +114,20 @@ class Tokens:
             self._logger.info(f"Access token expires in: {str(at_left)[:-7]}")
             self._logger.info(f"Refresh token expires in: {str(rt_left)[:-7]}")
         else:
-            self._logger.warning("[Schwabdev] Could not load tokens from DB, starting authorization flow.")
+            self._logger.warning("[Schwabdev] Could not load tokens from store, starting authorization flow.")
             self.update_tokens(force_refresh_token=True)
+
+    def _build_store(self, tokens_db: str) -> TokenStore:
+        """Select a token store backend from the tokens_db string."""
+        if tokens_db.startswith(("redis://", "rediss://")):
+            return RedisTokenStore(tokens_db, self._logger)
+        if tokens_db.endswith(".json"):
+            return JSONTokenStore(tokens_db, self._logger)
+        return SqliteTokenStore(tokens_db, self._logger)
 
     def _close(self):
         try:
-            self._conn.close()
+            self._store.close()
         except Exception:
             pass
 
@@ -169,36 +164,32 @@ class Tokens:
         dt = datetime.datetime.fromisoformat(value)
         return dt if dt.tzinfo is not None else dt.replace(tzinfo=_UTC)
 
-    def _load_tokens_from_db(self) -> bool:
+    def _load_tokens_from_store(self) -> bool:
         """
-        Load tokens from the sqlite database into memory.
+        Load tokens from the token store into memory.
 
         Returns:
             bool: True if tokens were loaded, False if no row exists.
         """
-        row = self._cur.execute(
-            "SELECT access_token_issued, refresh_token_issued, access_token, refresh_token, "
-            "id_token, expires_in, token_type, scope FROM schwabdev LIMIT 1"
-        ).fetchone()
-        if not row:
+        fields = self._store.load()
+        if not fields:
             return False
 
-        (at_issued, rt_issued, access_token, refresh_token, id_token, expires_in, token_type, scope) = row
-        self._access_token_issued = self._parse_dt(at_issued)
-        self._refresh_token_issued = self._parse_dt(rt_issued)
+        self._access_token_issued = self._parse_dt(fields["access_token_issued"])
+        self._refresh_token_issued = self._parse_dt(fields["refresh_token_issued"])
         try:
-            self.access_token = self._dec(access_token)
-            self.refresh_token = self._dec(refresh_token)
-            self.id_token = self._dec(id_token)
+            self.access_token = self._dec(fields["access_token"])
+            self.refresh_token = self._dec(fields["refresh_token"])
+            self.id_token = self._dec(fields["id_token"])
         except Exception as e:
-            self._logger.error(f"[Schwabdev] Could not decrypt tokens from sqlite database ({e})")
+            self._logger.error(f"[Schwabdev] Could not decrypt tokens from store ({e})")
             return False
         return True
 
     def _set_tokens(self, at_issued: datetime.datetime, rt_issued: datetime.datetime,
                     token_dictionary: dict) -> bool:
         """
-        Persist tokens to sqlite and set in-memory variables.
+        Persist tokens to the store and set in-memory variables.
 
         Args:
             at_issued (datetime.datetime): access token issued datetime.
@@ -222,23 +213,17 @@ class Tokens:
         self._refresh_token_issued = rt_issued
         self._access_token_timeout = token_dictionary.get("expires_in", 1800)
 
-        try:
-            self._cur.execute("DELETE FROM schwabdev")
-            self._cur.execute(
-                "INSERT INTO schwabdev (access_token_issued, refresh_token_issued, access_token, "
-                "refresh_token, id_token, expires_in, token_type, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (at_issued.isoformat(), rt_issued.isoformat(),
-                 self._enc(self.access_token), self._enc(self.refresh_token), self._enc(self.id_token),
-                 self._access_token_timeout,
-                 token_dictionary.get("token_type", "Bearer"),
-                 token_dictionary.get("scope", "api")),
-            )
-            self._conn.commit()
-            return True
-        except Exception as e:
-            self._logger.error(e)
-            self._logger.error("[Schwabdev] Could not write tokens to sqlite database")
-            return False
+        fields = {
+            "access_token_issued": at_issued.isoformat(),
+            "refresh_token_issued": rt_issued.isoformat(),
+            "access_token": self._enc(self.access_token),
+            "refresh_token": self._enc(self.refresh_token),
+            "id_token": self._enc(self.id_token),
+            "expires_in": self._access_token_timeout,
+            "token_type": token_dictionary.get("token_type", "Bearer"),
+            "scope": token_dictionary.get("scope", "api"),
+        }
+        return self._store.save(fields)
 
     def _post_oauth_token(self, grant_type: str, code: str) -> requests.Response:
         """
@@ -288,23 +273,14 @@ class Tokens:
             return self._update_access_token()
         return False
 
-    def _release_txn(self):
-        """Roll back to release an EXCLUSIVE transaction if one is still open."""
-        if self._conn.in_transaction:
-            self._conn.rollback()
-
     def _update_access_token(self, overwrite: bool = False) -> bool:
         """Refresh the access token using the refresh token (coordinated across instances)."""
         with self._update_lock:
             last_known = self._access_token_issued
-            try:
-                # Begin early and hold throughout DB+HTTP so only one instance refreshes at a time.
-                self._cur.execute("BEGIN EXCLUSIVE")
-            except sqlite3.Error as e:
-                self._logger.error(f"[Schwabdev] Could not begin exclusive transaction ({e})")
+            if not self._store.acquire_lock():
                 return False
             try:
-                self._load_tokens_from_db()
+                self._load_tokens_from_store()
                 if self._access_token_issued > last_known and not overwrite:
                     self._logger.info(f"Access token updated elsewhere at {self._access_token_issued}.")
                     return True
@@ -325,23 +301,21 @@ class Tokens:
                 self._logger.error(f"[Schwabdev] Could not update access token ({e})")
                 return False
             finally:
-                self._release_txn()  # _set_tokens commits on success; otherwise release the lock
+                self._store.release_lock()  # save() commits on success; otherwise release the lock
 
     def _update_refresh_token(self, overwrite: bool = False) -> bool:
         """Get new refresh and access tokens via the authorization-code flow (coordinated across instances)."""
         with self._update_lock:
             last_known = self._refresh_token_issued
-            try:
-                self._cur.execute("BEGIN EXCLUSIVE")  # so other instances know we're updating
-            except sqlite3.Error as e:
+            if not self._store.acquire_lock():
                 now = _now()
                 if last_known <= now and self._access_token_issued <= now:
-                    self._logger.critical(f"Refresh token and Access token are invalid, couldn't get db lock ({e}).")
+                    self._logger.critical("Refresh token and Access token are invalid, couldn't get store lock.")
                 elif last_known <= now:
                     self._logger.warning("Access token valid, Refresh token invalid")
                 return False  # otherwise: still have time left, assume another instance is updating
             try:
-                self._load_tokens_from_db()
+                self._load_tokens_from_store()
                 if self._refresh_token_issued > last_known and not overwrite:
                     self._logger.info(f"Refresh token updated elsewhere at {self._refresh_token_issued}.")
                     return True
@@ -361,7 +335,7 @@ class Tokens:
                 self._logger.error(f"[Schwabdev] Could not update refresh token ({e})")
                 return False
             finally:
-                self._release_txn()
+                self._store.release_lock()
 
     def _prompt_for_auth(self, auth_url: str):
         """Obtain the authorization callback URL/code, via call_for_auth or the browser+stdin flow."""

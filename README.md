@@ -24,6 +24,7 @@ Useful links:
 - Backtest and deploy strategies with the <a target="_blank" href="https://tylerebowers.github.io/Schwabdev/?source=pages%2Ftc_details.html">Trader Context submodule</a>. (Beta)
 - Support for Synchronous and Asynchronous programming <a target="_blank" href="https://github.com/tylerebowers/Schwabdev/tree/main/docs/examples/async_api_calls.py">Examples</a>. 
 - Optional token database encryption for security <a target="_blank" href="https://github.com/tylerebowers/Schwabdev/blob/main/docs/examples/extra/encrypted_db_setup.py">Example</a>.
+- Pluggable token storage: sqlite (default), JSON file (`tokens_db="...tokens.json"`), or Redis (`tokens_db="redis://..."`, install with `pip install 'schwabdev[redis]'`).
 - Optional automatic starting/stopping of streamer when market opens/closes.  
 - Streaming stability with automatic restarts if the streamer crashes.  
 
